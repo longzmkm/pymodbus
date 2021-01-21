@@ -18,7 +18,9 @@ from pymodbus.framer.tls_framer import ModbusTlsFramer
 from pymodbus.framer.binary_framer import ModbusBinaryFramer
 from pymodbus.utilities import hexlify_packets, ModbusTransactionState
 from pymodbus.compat import iterkeys, byte2int
-
+import redis
+import time
+import binascii
 
 # Python 2 compatibility.
 try:
@@ -26,11 +28,11 @@ try:
 except NameError:
     TimeoutError = socket.timeout
 
-
 # --------------------------------------------------------------------------- #
 # Logging
 # --------------------------------------------------------------------------- #
 import logging
+
 _logger = logging.getLogger(__name__)
 
 
@@ -99,7 +101,7 @@ class ModbusTransactionManager(object):
             return self.base_adu_size + 2  # Fcode(1), ExcecptionCode(1)
         elif isinstance(self.client.framer, ModbusAsciiFramer):
             return self.base_adu_size + 4  # Fcode(2), ExcecptionCode(2)
-        elif isinstance(self.client.framer, (ModbusRtuFramer, 
+        elif isinstance(self.client.framer, (ModbusRtuFramer,
                                              ModbusBinaryFramer)):
             return self.base_adu_size + 2  # Fcode(1), ExcecptionCode(1)
 
@@ -212,24 +214,47 @@ class ModbusTransactionManager(object):
         :return: response
         """
         last_exception = None
+
+        # TODO 获取环境变量中的串口 确定到底是使用真实串口 还是虚拟串口
+        a = True
         try:
-            self.client.connect()
-            packet = self.client.framer.buildPacket(packet)
-            if _logger.isEnabledFor(logging.DEBUG):
-                _logger.debug("SEND: " + hexlify_packets(packet))
-            size = self._send(packet)
-            if broadcast:
+            if a:
+
+                # self.client.mqtt_client.publish(topic='topic', payload='message')
+                redis_client = redis.Redis("0.0.0.0")
+                # redis 的链接
+
+                # 发送数据
+                packet = self.client.framer.buildPacket(packet)
+                userid = '1026'
+                topic = '%s/modbusRtu/down' % userid
+                # self.client.mqtt_client.publish(topic=topic, payload=binascii.hexlify(packet).decode('utf-8'))
+                print('send message topic:%s , data:%s' % (topic, binascii.hexlify(packet).decode('utf-8')))
+                time.sleep(5)
+                key = '{userid}/modbusRtu/up/{command}'.format(userid=userid,command=binascii.hexlify(packet).decode('utf-8'))
+                print(key)
+                v = redis_client.get(key)
+                print('receive message data:%s' % v)
+                if v:
+                    result = bytearray.fromhex(v.decode('utf-8'))
+            else:
+                self.client.connect()
+                packet = self.client.framer.buildPacket(packet)
+                if _logger.isEnabledFor(logging.DEBUG):
+                    _logger.debug("SEND: " + hexlify_packets(packet))
+                size = self._send(packet)
+                if broadcast:
+                    if size:
+                        _logger.debug("Changing transaction state from 'SENDING' "
+                                      "to 'TRANSACTION_COMPLETE'")
+                        self.client.state = ModbusTransactionState.TRANSACTION_COMPLETE
+                    return b'', None
                 if size:
                     _logger.debug("Changing transaction state from 'SENDING' "
-                                  "to 'TRANSACTION_COMPLETE'")
-                    self.client.state = ModbusTransactionState.TRANSACTION_COMPLETE
-                return b'', None
-            if size:
-                _logger.debug("Changing transaction state from 'SENDING' "
-                              "to 'WAITING FOR REPLY'")
-                self.client.state = ModbusTransactionState.WAITING_FOR_REPLY
-            result = self._recv(response_length, full)
-            if _logger.isEnabledFor(logging.DEBUG):
+                                  "to 'WAITING FOR REPLY'")
+                    self.client.state = ModbusTransactionState.WAITING_FOR_REPLY
+                result = self._recv(response_length, full)
+                if _logger.isEnabledFor(logging.DEBUG):
                     _logger.debug("RECV: " + hexlify_packets(result))
 
         except (socket.error, ModbusIOException,
@@ -276,7 +301,7 @@ class ModbusTransactionManager(object):
                 else:
                     func_code = -1
 
-                if func_code < 0x80:    # Not an error
+                if func_code < 0x80:  # Not an error
                     if isinstance(self.client.framer, ModbusSocketFramer):
                         # Ommit UID, which is included in header size
                         h_size = self.client.framer._hsize
@@ -455,6 +480,7 @@ class FifoTransactionManager(ModbusTransactionManager):
         """
         _logger.debug("Deleting transaction %d" % tid)
         if self.transactions: self.transactions.pop(0)
+
 
 # --------------------------------------------------------------------------- #
 # Exported symbols
